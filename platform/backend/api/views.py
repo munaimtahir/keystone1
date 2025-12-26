@@ -351,11 +351,18 @@ class AppViewSet(viewsets.ModelViewSet):
             if code != 0:
                 raise Exception(f"Git clone failed: {err or out}")
             
-            # Check for docker-compose.yml first (multi-service apps) - use container path for file checks
-            has_compose = (repo_dir_container / "docker-compose.yml").exists() or (repo_dir_container / "compose.yml").exists()
-            compose_file = "docker-compose.yml" if (repo_dir_container / "docker-compose.yml").exists() else "compose.yml" if (repo_dir_container / "compose.yml").exists() else None
+            # Check for docker-compose.yml first (multi-service apps)
+            # Check both container and host paths (volume mount should sync them, but check both for safety)
+            has_compose_container = (repo_dir_container / "docker-compose.yml").exists() or (repo_dir_container / "compose.yml").exists()
+            has_compose_host = (repo_dir / "docker-compose.yml").exists() or (repo_dir / "compose.yml").exists()
+            has_compose = has_compose_container or has_compose_host
+            compose_file = None
+            if (repo_dir_container / "docker-compose.yml").exists() or (repo_dir / "docker-compose.yml").exists():
+                compose_file = "docker-compose.yml"
+            elif (repo_dir_container / "compose.yml").exists() or (repo_dir / "compose.yml").exists():
+                compose_file = "compose.yml"
             # #region agent log
-            _debug_log("views.py:312", "docker-compose detection", {"has_compose": has_compose, "compose_file": compose_file, "repo_dir": str(repo_dir), "repo_dir_container": str(repo_dir_container)}, "B")
+            _debug_log("views.py:312", "docker-compose detection", {"has_compose": has_compose, "has_compose_container": has_compose_container, "has_compose_host": has_compose_host, "compose_file": compose_file, "repo_dir": str(repo_dir), "repo_dir_container": str(repo_dir_container), "container_docker_compose_exists": (repo_dir_container / "docker-compose.yml").exists(), "host_docker_compose_exists": (repo_dir / "docker-compose.yml").exists()}, "B")
             # #endregion
             
             # Detect app structure at root level - use container path for file checks
@@ -495,14 +502,20 @@ class AppViewSet(viewsets.ModelViewSet):
             env_vars = app.env_vars or {}
             deploy_mode = env_vars.get("_keystone_deploy_mode", "dockerfile")
             # #region agent log
-            _debug_log("views.py:442", "deploy: deployment mode", {"deploy_mode": deploy_mode, "env_vars": env_vars}, "B")
+            _debug_log("views.py:442", "deploy: deployment mode", {"deploy_mode": deploy_mode, "env_vars": env_vars, "app_slug": app.slug, "repo_dir": str(repo_dir), "compose_file_exists": (repo_dir / "docker-compose.yml").exists() if repo_dir.exists() else False}, "B")
             # #endregion
             
             if deploy_mode == "compose":
                 # Deploy using docker-compose
+                # #region agent log
+                _debug_log("views.py:448", "deploy: using compose mode", {"app_slug": app.slug}, "B")
+                # #endregion
                 return self._deploy_compose(app, deployment, repo_dir, logs)
             else:
                 # Deploy using single Dockerfile
+                # #region agent log
+                _debug_log("views.py:451", "deploy: using dockerfile mode", {"app_slug": app.slug, "build_context": env_vars.get("_keystone_build_context", ".")}, "B")
+                # #endregion
                 return self._deploy_dockerfile(app, deployment, repo_dir, logs)
             
         except Exception as e:

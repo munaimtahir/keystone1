@@ -68,6 +68,9 @@ services:
   backend:
     build:
       context: ./platform/backend
+      args:
+        USER_ID: ${USER_ID:-1004}
+        GROUP_ID: ${GROUP_ID:-1004}
     container_name: keystone-backend
     restart: unless-stopped
     environment:
@@ -135,4 +138,3 @@ networks:
 volumes:
   pgdata:
     name: keystone_pgdata
-

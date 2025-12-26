@@ -25,8 +25,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY . .
 
+# Create user with same UID/GID as host user to avoid permission issues
+# UID/GID 1004 matches the host user 'munaim'
+ARG USER_ID=1004
+ARG GROUP_ID=1004
+RUN groupadd -g ${GROUP_ID} appuser || true && \
+    useradd -u ${USER_ID} -g ${GROUP_ID} -m -s /bin/bash appuser || true && \
+    chown -R appuser:appuser /app
+
 # Collect static files
 RUN python manage.py collectstatic --noinput 2>/dev/null || true
+
+# Switch to non-root user
+USER appuser
 
 EXPOSE 8000
 
