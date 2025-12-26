@@ -25,10 +25,21 @@ from .models import App, Deployment
 from .serializers import AppSerializer, DeploymentSerializer
 
 # Directories for repos and logs
-REPOS_DIR = Path("/runtime/repos")
-LOGS_DIR = Path("/runtime/logs")
-REPOS_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
+# Check if running inside container and convert to host path if needed
+REPOS_DIR_CONTAINER = Path("/runtime/repos")
+LOGS_DIR_CONTAINER = Path("/runtime/logs")
+
+# Get host runtime path from environment (set in docker-compose.yml)
+HOST_RUNTIME_PATH = os.environ.get('HOST_RUNTIME_PATH', '/home/munaim/keystone/apps/keystone/runtime')
+HOST_RUNTIME_PATH = Path(HOST_RUNTIME_PATH)
+
+# Use host paths for Docker commands (Docker runs on host, not in container)
+REPOS_DIR = HOST_RUNTIME_PATH / "repos"
+LOGS_DIR = HOST_RUNTIME_PATH / "logs"
+
+# Create directories using container paths (for file operations inside container)
+REPOS_DIR_CONTAINER.mkdir(parents=True, exist_ok=True)
+LOGS_DIR_CONTAINER.mkdir(parents=True, exist_ok=True)
 
 # #region agent log
 import json
@@ -317,40 +328,44 @@ class AppViewSet(viewsets.ModelViewSet):
         
         try:
             # #region agent log
-            _debug_log("views.py:297", "REPOS_DIR value", {"REPOS_DIR": str(REPOS_DIR), "REPOS_DIR_exists": REPOS_DIR.exists(), "REPOS_DIR_absolute": str(REPOS_DIR.resolve())}, "A")
+            _debug_log("views.py:297", "REPOS_DIR value", {"REPOS_DIR": str(REPOS_DIR), "REPOS_DIR_exists": REPOS_DIR.exists(), "REPOS_DIR_absolute": str(REPOS_DIR.resolve()), "HOST_RUNTIME_PATH": str(HOST_RUNTIME_PATH), "REPOS_DIR_CONTAINER": str(REPOS_DIR_CONTAINER)}, "A")
             # #endregion
             # Clone or update repo
+            # Use container path for file operations (git clone, file checks)
+            repo_dir_container = REPOS_DIR_CONTAINER / app.slug
+            # Use host path for Docker commands (Docker runs on host)
             repo_dir = REPOS_DIR / app.slug
             # #region agent log
-            _debug_log("views.py:299", "repo_dir path construction", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "app_slug": app.slug}, "A")
+            _debug_log("views.py:299", "repo_dir path construction", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "repo_dir_container": str(repo_dir_container), "repo_dir_container_exists": repo_dir_container.exists(), "app_slug": app.slug}, "A")
             # #endregion
             
-            if repo_dir.exists():
-                shutil.rmtree(repo_dir)
+            # Use container path for file operations
+            if repo_dir_container.exists():
+                shutil.rmtree(repo_dir_container)
             
-            # Clone repo
+            # Clone repo to container path (will be visible on host via volume mount)
             code, out, err = run_cmd(
-                ["git", "clone", "--depth", "1", "-b", app.branch, app.git_url, str(repo_dir)]
+                ["git", "clone", "--depth", "1", "-b", app.branch, app.git_url, str(repo_dir_container)]
             )
             
             if code != 0:
                 raise Exception(f"Git clone failed: {err or out}")
             
-            # Check for docker-compose.yml first (multi-service apps)
-            has_compose = (repo_dir / "docker-compose.yml").exists() or (repo_dir / "compose.yml").exists()
-            compose_file = "docker-compose.yml" if (repo_dir / "docker-compose.yml").exists() else "compose.yml" if (repo_dir / "compose.yml").exists() else None
+            # Check for docker-compose.yml first (multi-service apps) - use container path for file checks
+            has_compose = (repo_dir_container / "docker-compose.yml").exists() or (repo_dir_container / "compose.yml").exists()
+            compose_file = "docker-compose.yml" if (repo_dir_container / "docker-compose.yml").exists() else "compose.yml" if (repo_dir_container / "compose.yml").exists() else None
             # #region agent log
-            _debug_log("views.py:312", "docker-compose detection", {"has_compose": has_compose, "compose_file": compose_file, "repo_dir": str(repo_dir)}, "B")
+            _debug_log("views.py:312", "docker-compose detection", {"has_compose": has_compose, "compose_file": compose_file, "repo_dir": str(repo_dir), "repo_dir_container": str(repo_dir_container)}, "B")
             # #endregion
             
-            # Detect app structure at root level
-            has_dockerfile = (repo_dir / "Dockerfile").exists()
-            has_requirements = (repo_dir / "requirements.txt").exists()
-            has_manage_py = (repo_dir / "manage.py").exists()
-            has_package_json = (repo_dir / "package.json").exists()
+            # Detect app structure at root level - use container path for file checks
+            has_dockerfile = (repo_dir_container / "Dockerfile").exists()
+            has_requirements = (repo_dir_container / "requirements.txt").exists()
+            has_manage_py = (repo_dir_container / "manage.py").exists()
+            has_package_json = (repo_dir_container / "package.json").exists()
             
-            # Find Dockerfile or app in subdirectories
-            dockerfile_path, app_type, build_context = self._find_dockerfile_or_app(repo_dir)
+            # Find Dockerfile or app in subdirectories - use container path
+            dockerfile_path, app_type, build_context = self._find_dockerfile_or_app(repo_dir_container)
             
             structure = {
                 "dockerfile": has_dockerfile or (dockerfile_path is not None),
@@ -358,7 +373,7 @@ class AppViewSet(viewsets.ModelViewSet):
                 "django": has_manage_py or app_type == "django",
                 "python": has_requirements or app_type == "python",
                 "node": has_package_json or app_type == "node",
-                "build_context": str(build_context.relative_to(repo_dir)) if build_context and build_context != repo_dir else ".",
+                "build_context": str(build_context.relative_to(repo_dir_container)) if build_context and build_context != repo_dir_container else ".",
                 "deploy_mode": "compose" if has_compose else "dockerfile",
             }
             
@@ -366,7 +381,8 @@ class AppViewSet(viewsets.ModelViewSet):
             if has_compose:
                 # Multi-service app with docker-compose.yml
                 # INJECT TRAEFIK CONFIGURATION into the compose file
-                compose_path = repo_dir / compose_file
+                # Use container path for file operations
+                compose_path = repo_dir_container / compose_file
                 modified_services = inject_traefik_config(
                     compose_path, 
                     app.slug, 
@@ -386,7 +402,7 @@ class AppViewSet(viewsets.ModelViewSet):
                 # Found Dockerfile (possibly in subdirectory)
                 app.env_vars = app.env_vars or {}
                 app.env_vars["_keystone_deploy_mode"] = "dockerfile"
-                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir_container)) if build_context != repo_dir_container else "."
                 
             elif has_dockerfile:
                 # Dockerfile at root
@@ -401,7 +417,7 @@ class AppViewSet(viewsets.ModelViewSet):
                     f.write(dockerfile_content)
                 app.env_vars = app.env_vars or {}
                 app.env_vars["_keystone_deploy_mode"] = "dockerfile"
-                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir_container)) if build_context != repo_dir_container else "."
                 structure["generated_dockerfile"] = True
                 
             elif app_type == "node":
@@ -411,7 +427,7 @@ class AppViewSet(viewsets.ModelViewSet):
                     f.write(dockerfile_content)
                 app.env_vars = app.env_vars or {}
                 app.env_vars["_keystone_deploy_mode"] = "dockerfile"
-                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir)) if build_context != repo_dir else "."
+                app.env_vars["_keystone_build_context"] = str(build_context.relative_to(repo_dir_container)) if build_context != repo_dir_container else "."
                 structure["generated_dockerfile"] = True
                 
             else:
@@ -464,12 +480,15 @@ class AppViewSet(viewsets.ModelViewSet):
         logs = []
         
         try:
+            # Use host path for Docker commands (Docker runs on host)
             repo_dir = REPOS_DIR / app.slug
+            # Use container path for file checks
+            repo_dir_container = REPOS_DIR_CONTAINER / app.slug
             # #region agent log
-            _debug_log("views.py:435", "deploy: repo_dir path", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "REPOS_DIR": str(REPOS_DIR)}, "A")
+            _debug_log("views.py:435", "deploy: repo_dir path", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "repo_dir_container": str(repo_dir_container), "repo_dir_container_exists": repo_dir_container.exists(), "REPOS_DIR": str(REPOS_DIR), "HOST_RUNTIME_PATH": str(HOST_RUNTIME_PATH)}, "A")
             # #endregion
             
-            if not repo_dir.exists():
+            if not repo_dir_container.exists():
                 raise Exception("Repo not found. Please prepare first.")
             
             # Get deployment mode from env_vars (set during prepare)
@@ -503,6 +522,7 @@ class AppViewSet(viewsets.ModelViewSet):
         """Deploy app using docker-compose with Traefik routing."""
         env_vars = app.env_vars or {}
         compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
+        # repo_dir is already the host path (passed from deploy method)
         # #region agent log
         _debug_log("views.py:466", "_deploy_compose entry", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "compose_file": compose_file, "compose_path": str((repo_dir / compose_file).resolve()) if (repo_dir / compose_file).exists() else "N/A"}, "C")
         # #endregion
@@ -522,8 +542,10 @@ class AppViewSet(viewsets.ModelViewSet):
         )
         
         # Handle .env file - copy from .env.example if exists and .env doesn't
-        env_example = repo_dir / ".env.example"
-        env_file = repo_dir / ".env"
+        # Use container path for file operations (files are in container, visible on host via mount)
+        repo_dir_container = REPOS_DIR_CONTAINER / app.slug
+        env_example = repo_dir_container / ".env.example"
+        env_file = repo_dir_container / ".env"
         if env_example.exists() and not env_file.exists():
             shutil.copy(env_example, env_file)
             logs.append("Created .env from .env.example")
@@ -601,6 +623,7 @@ class AppViewSet(viewsets.ModelViewSet):
         """Deploy app using single Dockerfile."""
         env_vars = app.env_vars or {}
         build_context = env_vars.get("_keystone_build_context", ".")
+        # repo_dir is already the host path (passed from deploy method)
         build_dir = repo_dir / build_context if build_context != "." else repo_dir
         # #region agent log
         _debug_log("views.py:555", "_deploy_dockerfile entry", {"repo_dir": str(repo_dir), "build_context": build_context, "build_dir": str(build_dir), "build_dir_exists": build_dir.exists(), "build_dir_absolute": str(build_dir.resolve()) if build_dir.exists() else "N/A", "dockerfile_exists": (build_dir / "Dockerfile").exists() if build_dir.exists() else False}, "D")
@@ -688,6 +711,7 @@ class AppViewSet(viewsets.ModelViewSet):
         
         if deploy_mode == "compose":
             # Stop compose stack
+            # Use host path for Docker commands
             repo_dir = REPOS_DIR / app.slug
             compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
             project_name = f"keystone-{app.slug}"
@@ -714,6 +738,7 @@ class AppViewSet(viewsets.ModelViewSet):
         
         if deploy_mode == "compose":
             # Get compose logs
+            # Use host path for Docker commands
             repo_dir = REPOS_DIR / app.slug
             compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
             project_name = f"keystone-{app.slug}"
