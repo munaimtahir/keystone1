@@ -1,0 +1,22 @@
+========================================
+Keystone Deployment Complete!
+========================================
+
+Public IP: 34.87.144.205
+
+Access Keystone Panel:
+  http://34.87.144.205
+
+Default Login:
+  Username: admin
+  Password: admin (change in .env)
+
+Traefik Dashboard (localhost only):
+  http://localhost:8080
+
+API Endpoint:
+  http://34.87.144.205/api
+
+========================================
+All containers are running and healthy!
+========================================
