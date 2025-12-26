@@ -76,6 +76,13 @@ def inject_traefik_config(compose_path, app_slug, app_traefik_rule):
     - Converts relative volume mounts to absolute paths
     - Backs up original file
     """
+    # Ensure compose_path is a Path object
+    compose_path = Path(compose_path)
+    
+    # Check if file exists
+    if not compose_path.exists():
+        raise FileNotFoundError(f"docker-compose.yml not found at {compose_path}")
+    
     # Read original compose file
     with open(compose_path, 'r') as f:
         compose_data = yaml.safe_load(f)
@@ -388,8 +395,20 @@ class AppViewSet(viewsets.ModelViewSet):
             if has_compose:
                 # Multi-service app with docker-compose.yml
                 # INJECT TRAEFIK CONFIGURATION into the compose file
-                # Use container path for file operations
-                compose_path = repo_dir_container / compose_file
+                # Use container path for file operations (files are synced via volume mount)
+                # But check both paths to find the file
+                compose_path_container = repo_dir_container / compose_file
+                compose_path_host = repo_dir / compose_file
+                # Use whichever path exists (should be both via volume mount, but be safe)
+                if compose_path_container.exists():
+                    compose_path = compose_path_container
+                elif compose_path_host.exists():
+                    compose_path = compose_path_host
+                else:
+                    raise Exception(f"docker-compose.yml not found at {compose_path_container} or {compose_path_host}")
+                # #region agent log
+                _debug_log("views.py:385", "inject_traefik_config call", {"compose_path": str(compose_path), "compose_path_exists": compose_path.exists(), "compose_path_container": str(compose_path_container), "compose_path_host": str(compose_path_host)}, "B")
+                # #endregion
                 modified_services = inject_traefik_config(
                     compose_path, 
                     app.slug, 
@@ -496,7 +515,12 @@ class AppViewSet(viewsets.ModelViewSet):
             # #endregion
             
             if not repo_dir_container.exists():
-                raise Exception("Repo not found. Please prepare first.")
+                # Also check host path in case volume mount issue
+                if not repo_dir.exists():
+                    raise Exception(f"Repo not found. Please prepare first. Checked: {repo_dir_container} and {repo_dir}")
+                else:
+                    # Host path exists but container path doesn't - volume mount issue
+                    raise Exception(f"Repo exists on host at {repo_dir} but not visible in container at {repo_dir_container}. Check volume mount.")
             
             # Get deployment mode from env_vars (set during prepare)
             env_vars = app.env_vars or {}
