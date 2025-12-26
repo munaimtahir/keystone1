@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import copy
+import time
 from pathlib import Path
 
 import yaml
@@ -28,6 +29,28 @@ REPOS_DIR = Path("/runtime/repos")
 LOGS_DIR = Path("/runtime/logs")
 REPOS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# #region agent log
+import json
+DEBUG_LOG_PATH = Path("/home/munaim/keystone/apps/keystone/.cursor/debug.log")
+def _debug_log(location, message, data=None, hypothesis_id=None):
+    try:
+        log_entry = {
+            "location": location,
+            "message": message,
+            "timestamp": int(time.time() * 1000),
+            "sessionId": "debug-session",
+            "runId": "run1",
+        }
+        if data:
+            log_entry["data"] = data
+        if hypothesis_id:
+            log_entry["hypothesisId"] = hypothesis_id
+        with open(DEBUG_LOG_PATH, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except:
+        pass
+# #endregion
 
 # Traefik network name
 TRAEFIK_NETWORK = "keystone_web"
@@ -293,8 +316,14 @@ class AppViewSet(viewsets.ModelViewSet):
         app.save()
         
         try:
+            # #region agent log
+            _debug_log("views.py:297", "REPOS_DIR value", {"REPOS_DIR": str(REPOS_DIR), "REPOS_DIR_exists": REPOS_DIR.exists(), "REPOS_DIR_absolute": str(REPOS_DIR.resolve())}, "A")
+            # #endregion
             # Clone or update repo
             repo_dir = REPOS_DIR / app.slug
+            # #region agent log
+            _debug_log("views.py:299", "repo_dir path construction", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "app_slug": app.slug}, "A")
+            # #endregion
             
             if repo_dir.exists():
                 shutil.rmtree(repo_dir)
@@ -310,6 +339,9 @@ class AppViewSet(viewsets.ModelViewSet):
             # Check for docker-compose.yml first (multi-service apps)
             has_compose = (repo_dir / "docker-compose.yml").exists() or (repo_dir / "compose.yml").exists()
             compose_file = "docker-compose.yml" if (repo_dir / "docker-compose.yml").exists() else "compose.yml" if (repo_dir / "compose.yml").exists() else None
+            # #region agent log
+            _debug_log("views.py:312", "docker-compose detection", {"has_compose": has_compose, "compose_file": compose_file, "repo_dir": str(repo_dir)}, "B")
+            # #endregion
             
             # Detect app structure at root level
             has_dockerfile = (repo_dir / "Dockerfile").exists()
@@ -433,6 +465,9 @@ class AppViewSet(viewsets.ModelViewSet):
         
         try:
             repo_dir = REPOS_DIR / app.slug
+            # #region agent log
+            _debug_log("views.py:435", "deploy: repo_dir path", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "REPOS_DIR": str(REPOS_DIR)}, "A")
+            # #endregion
             
             if not repo_dir.exists():
                 raise Exception("Repo not found. Please prepare first.")
@@ -440,6 +475,9 @@ class AppViewSet(viewsets.ModelViewSet):
             # Get deployment mode from env_vars (set during prepare)
             env_vars = app.env_vars or {}
             deploy_mode = env_vars.get("_keystone_deploy_mode", "dockerfile")
+            # #region agent log
+            _debug_log("views.py:442", "deploy: deployment mode", {"deploy_mode": deploy_mode, "env_vars": env_vars}, "B")
+            # #endregion
             
             if deploy_mode == "compose":
                 # Deploy using docker-compose
@@ -465,6 +503,9 @@ class AppViewSet(viewsets.ModelViewSet):
         """Deploy app using docker-compose with Traefik routing."""
         env_vars = app.env_vars or {}
         compose_file = env_vars.get("_keystone_compose_file", "docker-compose.yml")
+        # #region agent log
+        _debug_log("views.py:466", "_deploy_compose entry", {"repo_dir": str(repo_dir), "repo_dir_exists": repo_dir.exists(), "repo_dir_absolute": str(repo_dir.resolve()) if repo_dir.exists() else "N/A", "compose_file": compose_file, "compose_path": str((repo_dir / compose_file).resolve()) if (repo_dir / compose_file).exists() else "N/A"}, "C")
+        # #endregion
         
         logs.append(f"Deploying with docker-compose: {compose_file}")
         logs.append(f"Traefik routing: {app.traefik_rule}")
@@ -503,12 +544,19 @@ class AppViewSet(viewsets.ModelViewSet):
         
         # Build images
         logs.append("Building images...")
+        # #region agent log
+        docker_cmd = ["docker", "compose", "-p", project_name, "-f", compose_file, "build", "--no-cache"]
+        _debug_log("views.py:506", "docker compose build command", {"cmd": docker_cmd, "cwd": str(repo_dir), "cwd_exists": Path(repo_dir).exists(), "cwd_absolute": str(Path(repo_dir).resolve()) if Path(repo_dir).exists() else "N/A", "compose_file_exists": (repo_dir / compose_file).exists() if repo_dir.exists() else False}, "C")
+        # #endregion
         code, out, err = run_cmd(
-            ["docker", "compose", "-p", project_name, "-f", compose_file, "build", "--no-cache"],
+            docker_cmd,
             cwd=str(repo_dir),
             timeout=900
         )
         logs.append(f"Build output:\n{out}\n{err}")
+        # #region agent log
+        _debug_log("views.py:511", "docker compose build result", {"returncode": code, "stdout": out[:500] if out else "", "stderr": err[:500] if err else ""}, "C")
+        # #endregion
         
         if code != 0:
             raise Exception(f"Docker compose build failed: {err or out}")
@@ -554,6 +602,9 @@ class AppViewSet(viewsets.ModelViewSet):
         env_vars = app.env_vars or {}
         build_context = env_vars.get("_keystone_build_context", ".")
         build_dir = repo_dir / build_context if build_context != "." else repo_dir
+        # #region agent log
+        _debug_log("views.py:555", "_deploy_dockerfile entry", {"repo_dir": str(repo_dir), "build_context": build_context, "build_dir": str(build_dir), "build_dir_exists": build_dir.exists(), "build_dir_absolute": str(build_dir.resolve()) if build_dir.exists() else "N/A", "dockerfile_exists": (build_dir / "Dockerfile").exists() if build_dir.exists() else False}, "D")
+        # #endregion
         
         # Stop existing container if any
         container_name = f"keystone-app-{app.slug}"
@@ -564,12 +615,19 @@ class AppViewSet(viewsets.ModelViewSet):
         image_tag = f"keystone/{app.slug}:latest"
         logs.append(f"Building image: {image_tag} (context: {build_context})")
         
+        # #region agent log
+        docker_cmd = ["docker", "build", "-t", image_tag, "."]
+        _debug_log("views.py:567", "docker build command", {"cmd": docker_cmd, "cwd": str(build_dir), "cwd_exists": build_dir.exists(), "cwd_absolute": str(build_dir.resolve()) if build_dir.exists() else "N/A"}, "D")
+        # #endregion
         code, out, err = run_cmd(
-            ["docker", "build", "-t", image_tag, "."],
+            docker_cmd,
             cwd=str(build_dir),
             timeout=600
         )
         logs.append(f"Build output:\n{out}\n{err}")
+        # #region agent log
+        _debug_log("views.py:572", "docker build result", {"returncode": code, "stdout": out[:500] if out else "", "stderr": err[:500] if err else ""}, "D")
+        # #endregion
         
         if code != 0:
             raise Exception(f"Docker build failed: {err or out}")
